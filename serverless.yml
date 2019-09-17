@@ -1,0 +1,280 @@
+service: saas-identity-cognito-lambda
+
+frameworkVersion: ">=1.1.0 <2.0.0"
+
+plugins:
+  - serverless-dynamodb-local
+  - serverless-offline
+  - serverless-offline-sns
+
+custom:
+  dynamodb:
+    start:
+      port: 8000
+      migrate: true
+      inMemory: true
+    migration:
+      dir: offline/migrations
+  serverless-offline-sns:
+    port: 4002
+    debug: true
+  serverless-offline:
+    noAuth: true
+
+provider:
+  name: aws
+  runtime: nodejs8.10
+  stage: test
+
+  environment:
+    ACCESS_CONTROL_ALLOW_ORIGIN: "*"
+    TENANT_DYNAMODB_TABLE: ${self:service}-tenant-${opt:stage, self:provider.stage}
+    USER_DYNAMODB_TABLE: ${self:service}-user-${opt:stage, self:provider.stage}
+    IDENTITY_TOPIC: identity-${opt:stage, self:provider.stage}
+    COGNITO_DOMAIN_PREFIX: harman-telematics-${opt:stage, self:provider.stage}
+    COGNITO_CLIENT_CALLBACK_URLS: https://d337wujqerfaz5.cloudfront.net/admin, http://localhost:3000
+    COGNITO_SNS_ARN:
+      {
+        Fn::Join:
+          [
+            "",
+            [
+              "arn:aws:sns:${self:provider.region}:",
+              { "Ref": "AWS::AccountId" },
+              ":${self:provider.environment.IDENTITY_TOPIC}",
+            ],
+          ],
+      }
+    POST_CONFIRMATION_LAMBDA_ARN:
+      {
+        Fn::Join:
+          [
+            "",
+            [
+              "arn:aws:lambda:${self:provider.region}:",
+              { "Ref": "AWS::AccountId" },
+              ":function:${self:service}-${opt:stage, self:provider.stage}-postConfirmationHandler",
+            ],
+          ],
+      }
+    STAGE: ${opt:stage, self:provider.stage}
+
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - cognito-idp:*
+      Resource: "*"
+    - Effect: Allow
+      Action:
+        - dynamodb:*
+      Resource: "arn:aws:dynamodb:${opt:region, self:provider.region}:*:table/*"
+    - Effect: Allow
+      Action:
+        - sns:*
+      Resource: "arn:aws:sns:${opt:region, self:provider.region}:*:*"
+    - Effect: Allow
+      Action:
+        - lambda:InvokeFunction
+      Resource: "*"
+
+  deploymentBucket:
+    name: ${cf:cloud-deploy-${opt:stage, self:provider.stage}.ServerlessDeploymentBucketName}
+
+  apiGateway:
+    restApiId: ${cf:cloud-deploy-${opt:stage, self:provider.stage}.ApiGatewayRestApiId}
+    restApiRootResourceId: ${cf:cloud-deploy-${opt:stage, self:provider.stage}.ApiGatewayRootResourceId}
+
+functions:
+  listTenants:
+    handler: src/lambda/tenant.list
+    events:
+      - http:
+          path: tenants
+          method: get
+          cors: true
+
+  getTenant:
+    handler: src/lambda/tenant.get
+    events:
+      - http:
+          path: tenants/{tenantId}
+          method: get
+          cors: true
+
+  createTenant:
+    handler: src/lambda/tenant.create
+    events:
+      - http:
+          path: tenants/{tenantId}
+          method: post
+          cors: true
+
+  updateTenant:
+    handler: src/lambda/tenant.update
+    events:
+      - http:
+          path: tenants/{tenantId}
+          method: put
+          cors: true
+
+  deleteTenant:
+    handler: src/lambda/tenant.delete
+    events:
+      - http:
+          path: tenants/{tenantId}
+          method: delete
+          cors: true
+
+  # This lambda arn is registered on new user pool creation and gets triggered by cognito on new user signup.
+  postConfirmationHandler:
+    handler: src/lambda/tenant.postUserRegistration
+
+  getToken:
+    handler: src/lambda/tenant.getToken
+    events:
+      - http:
+          path: tenants/{tenantId}/token
+          method: post
+          cors: true
+
+  updateToken:
+    handler: src/lambda/tenant.updateToken
+    events:
+      - http:
+          path: tenants/{tenantId}/token
+          method: put
+          cors: true
+
+  createUser:
+    handler: src/lambda/user.create
+    events:
+      - http:
+          path: users/{userId}
+          method: post
+          cors: true
+          authorizer: ${self:custom.authorizers.${self:custom.authorizers.status}.AdminAuthorizer}
+
+  # This lambda is called from tenant service on user sign-up from UI
+  createUserPostSignUp:
+    handler: src/lambda/user.createUserPostSignUp
+
+  listUsers:
+    handler: src/lambda/user.list
+    events:
+      - http:
+          path: users
+          method: get
+          cors: true
+          authorizer: ${self:custom.authorizers.${self:custom.authorizers.status}.AdminAuthorizer}
+
+  getUser:
+    handler: src/lambda/user.get
+    events:
+      - http:
+          path: users/{userId}
+          method: get
+          cors: true
+          authorizer: ${self:custom.authorizers.${self:custom.authorizers.status}.UserAuthorizer}
+
+  updateUser:
+    handler: src/lambda/user.update
+    events:
+      - http:
+          path: users/{userId}
+          method: put
+          cors: true
+          authorizer: ${self:custom.authorizers.${self:custom.authorizers.status}.UserAuthorizer}
+
+  deleteUser:
+    handler: src/lambda/user.delete
+    events:
+      - http:
+          path: users/{userId}
+          method: delete
+          cors: true
+          authorizer: ${self:custom.authorizers.${self:custom.authorizers.status}.AdminAuthorizer}
+
+  deleteAllUsers:
+    handler: src/lambda/user.deleteAll
+    events:
+      - http:
+          path: users
+          method: delete
+          cors: true
+          authorizer: ${self:custom.authorizers.${self:custom.authorizers.status}.AdminAuthorizer}
+
+  loginUser:
+    handler: src/lambda/user.login
+    events:
+      - http:
+          path: users/{userId}/login
+          method: post
+          cors: true
+          
+resources:
+  Resources:
+    UserDynamoDBTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.USER_DYNAMODB_TABLE}
+        AttributeDefinitions:
+          - AttributeName: tenantId
+            AttributeType: S
+          - AttributeName: userId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: tenantId
+            KeyType: HASH
+          - AttributeName: userId
+            KeyType: RANGE
+        ProvisionedThroughput:
+          ReadCapacityUnits: 10
+          WriteCapacityUnits: 10
+        GlobalSecondaryIndexes:
+          - IndexName: UserIdIndex
+            KeySchema:
+              - AttributeName: userId
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+            ProvisionedThroughput:
+              ReadCapacityUnits: 10
+              WriteCapacityUnits: 10
+    TenantTable:
+      Type: AWS::DynamoDB::Table
+      DeletionPolicy: Retain
+      Properties:
+        TableName: ${self:provider.environment.TENANT_DYNAMODB_TABLE}
+        AttributeDefinitions:
+          - AttributeName: tenantId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: tenantId
+            KeyType: HASH
+        ProvisionedThroughput:
+          ReadCapacityUnits: 10
+          WriteCapacityUnits: 10
+    IdentityTopic:
+      Type: "AWS::SNS::Topic"
+      Properties:
+        DisplayName: ${self:provider.environment.IDENTITY_TOPIC}
+        TopicName: ${self:provider.environment.IDENTITY_TOPIC}
+    PostSignupTriggerInvokePermission:
+      Type: AWS::Lambda::Permission
+      DependsOn: PostConfirmationHandlerLambdaFunction
+      Properties:
+        Action: lambda:InvokeFunction
+        Principal: cognito-idp.amazonaws.com
+        FunctionName: ${self:service}-${opt:stage, self:provider.stage}-postConfirmationHandler
+        SourceArn: 
+          {
+            "Fn::Join":
+              [
+                ":",
+                [
+                  "arn:aws:cognito-idp:${self:provider.region}",
+                  { "Ref": "AWS::AccountId" },
+                  "userpool/*",
+                ],
+              ],
+          }
